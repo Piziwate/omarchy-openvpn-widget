@@ -4,6 +4,7 @@ from argparse import Namespace
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from subprocess import CompletedProcess
+import io
 import tempfile
 import unittest
 from unittest.mock import call, patch
@@ -102,9 +103,73 @@ class BackendTests(unittest.TestCase):
                 patch.object(module, "run", side_effect=fake_run) as run,
             ):
                 with self.assertRaisesRegex(module.WidgetError, "Connection failed"):
-                    module.command_connect(Namespace(config=str(path)))
+                    module.command_connect(Namespace(config=str(path), password_stdin=False))
 
         self.assertIn(call(["nmcli", "connection", "down", "uuid", "vpn-uuid"], check=False), run.call_args_list)
+
+
+    def test_save_credentials_in_ask_password_mode_keeps_only_the_username(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = (Path(directory) / "office.ovpn")
+            path.touch()
+            state = {}
+            payload = '{"username": "alice", "password": "", "askPassword": true}\n'
+            with (
+                patch.object(module.sys, "stdin", io.StringIO(payload)),
+                patch.object(module, "load_state", return_value=state),
+                patch.object(module, "save_state"),
+                patch.object(module, "secret_store") as secret_store,
+                patch.object(module, "secret_clear") as secret_clear,
+                patch.object(module, "emit") as emit,
+            ):
+                module.command_save_credentials(Namespace(config=str(path)))
+
+        secret_store.assert_called_once_with(path.resolve(), "username", "alice")
+        secret_clear.assert_called_once_with(path.resolve(), "password")
+        self.assertTrue(state[str(path.resolve())]["askPassword"])
+        self.assertTrue(emit.call_args.args[0]["askPassword"])
+
+    def test_save_credentials_requires_a_password_unless_asked_each_time(self):
+        with patch.object(module.sys, "stdin", io.StringIO('{"username": "alice", "password": ""}\n')):
+            with self.assertRaisesRegex(module.WidgetError, "password are required"):
+                module.read_credentials()
+
+    def _connect(self, directory, state, password_stdin, stdin=""):
+        path = Path(directory) / "office.ovpn"
+        path.touch()
+        key = str(path.resolve())
+        written = []
+
+        def fake_run(command, **_kwargs):
+            if "passwd-file" in command:
+                written.append(Path(command[-1]).read_text())
+            return CompletedProcess(command, 0, "", "")
+
+        with (
+            patch.object(module.sys, "stdin", io.StringIO(stdin)),
+            patch.object(module, "secret_lookup", side_effect=lambda _path, field: f"stored-{field}"),
+            patch.object(module, "load_state", return_value={key: state} if state else {}),
+            patch.object(module, "ensure_imported", return_value={"uuid": "vpn-uuid", "name": "Office"}),
+            patch.object(module, "run", side_effect=fake_run),
+            patch.object(module, "emit"),
+        ):
+            module.command_connect(Namespace(config=str(path), password_stdin=password_stdin))
+        return written
+
+    def test_connect_uses_password_from_stdin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            written = self._connect(directory, {"askPassword": True}, True, '{"password": "123456"}\n')
+        self.assertEqual(written, ["vpn.secrets.password:123456\n"])
+
+    def test_connect_never_replays_a_stored_password_in_ask_password_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(module.WidgetError, "password is required"):
+                self._connect(directory, {"askPassword": True}, False)
+
+    def test_connect_uses_keyring_password_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            written = self._connect(directory, {}, False)
+        self.assertEqual(written, ["vpn.secrets.password:stored-password\n"])
 
 
 if __name__ == "__main__":

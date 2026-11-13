@@ -17,6 +17,7 @@ A native [Omarchy](https://omarchy.org/) bar widget for managing OpenVPN profile
 - Shows only the **Disconnect** action while a profile is active.
 - Supports custom display names without renaming configuration files.
 - Stores credentials in the desktop Secret Service keyring.
+- Can ask for the password on every connection, for one-time passwords (OTP/MFA).
 - Integrates with Omarchy's bar settings and current theme.
 - Refreshes connection state automatically.
 
@@ -32,7 +33,7 @@ The local state file is stored at:
 ~/.local/state/omarchy-openvpn-widget/profiles.json
 ```
 
-It contains only profile paths, NetworkManager UUIDs, and custom display names.
+It contains only profile paths, NetworkManager UUIDs, custom display names, and whether a profile asks for its password on every connection.
 
 ## Requirements
 
@@ -86,6 +87,17 @@ The previous installation is preserved in a hidden `.community.openvpn.backup.*`
 3. Open the shield icon in the bar.
 4. Use the connect icon beside a profile.
 5. Enter the VPN username and password when prompted.
+
+### One-time passwords
+
+If the VPN password is a one-time code (OTP, MFA token), enable **Ask for the password on every connection** in the credentials form. Only the username is then saved in the keyring; the password field is replaced by a prompt shown each time you connect, and the code is passed to NetworkManager through a temporary `0600` file exactly like a stored password, without ever being saved or replayed.
+
+From a terminal, the same mode is available with:
+
+```bash
+read -rsp "OTP: " otp && printf '{"password": "%s"}\n' "$otp" \
+  | scripts/openvpn-widget connect --config ~/.config/openvpn/office.ovpn --password-stdin
+```
 
 The profile list is scanned non-recursively. Certificate and key paths referenced by an OpenVPN file must remain valid after NetworkManager imports it.
 
